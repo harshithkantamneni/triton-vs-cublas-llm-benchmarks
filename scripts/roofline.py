@@ -4,15 +4,14 @@
 Builds an A100 roofline from the *committed measurements* (no GPU required):
 each shape's achieved GEMM throughput (TFLOP/s, p50) is plotted against its
 operational intensity (FLOP / byte of DRAM traffic), against the A100's
-compute and memory ceilings. This is what explains the two headline results
-at once:
+compute and memory ceilings:
 
-  - small-batch LLM GEMMs sit LEFT of the ridge point  -> memory-bound, so
-    cutting an HBM round-trip via epilogue fusion is what wins there (the
-    1.73x fused result);
-  - large-batch GEMMs sit near the compute roof          -> compute-bound, so
-    cuBLAS's tuned tensor-core scheduling dominates a bare Triton GEMM
-    (the ~0.78x bare-GEMM median).
+  - small-batch LLM GEMMs sit LEFT of the ridge point;
+  - large-batch GEMMs sit RIGHT of it, nearer the compute roof.
+
+  The fused kernel is faster than cuBLAS on the same share of cells on both
+  sides (10 of 30 and 42 of 122), so the ridge does not explain where fusion
+  wins. See the README.
 
 Operational intensity uses the algorithmic-minimum DRAM traffic for a GEMM
 (read A once, read B once, write C once); real kernels move more (tile
