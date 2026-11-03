@@ -2,7 +2,7 @@
 
 Benchmarks Triton fused GPU kernels against cuBLAS / PyTorch baselines for the matmul shapes that dominate LLM inference (projection and FFN GEMMs), and measures where hand-written fusion actually wins. Run on an NVIDIA A100-SXM4-80GB.
 
-It reports p50 latency, GEMM-equivalent TFLOP/s, effective memory bandwidth, and p90/p50 tail jitter across 76 LLM-shaped GEMM shapes, and isolates the regime where a fused `linear + bias + activation` Triton kernel beats a separate cuBLAS GEMM plus epilogue.
+It reports p50 latency, GEMM-equivalent TFLOP/s, effective memory bandwidth, and p90/p50 tail jitter across 76 LLM-shaped GEMM shapes, and isolates the regime where a fused `linear + bias + activation` Triton kernel is faster than a separate cuBLAS GEMM plus epilogue.
 
 ## Key results (A100-SXM4-80GB, fp16)
 
@@ -13,18 +13,20 @@ It reports p50 latency, GEMM-equivalent TFLOP/s, effective memory bandwidth, and
 | Shapes benchmarked | **76** LLaMA/Mistral-style projection and FFN GEMMs | `src/shapes.py` |
 | Metrics per shape | p50/p90 latency, TFLOP/s, GB/s, p90/p50 jitter | `data/*.csv` |
 
-**Where the win is.** cuBLAS is very well tuned for large dense GEMM, so a bare Triton GEMM is generally not faster (median about 0.78x vs PyTorch/cuBLAS across the 76 shapes). The win comes from fusion: folding `linear + bias + GeLU/SiLU` into one Triton kernel removes two intermediate HBM round-trips and two kernel launches (the eager baseline is three: GEMM, bias add, activation — see `src/bytes_model.py`). That pays off at small-batch, memory-bound FFN projections, up to 1.73x there, with the fused kernels at about parity (median 0.96x) elsewhere. The suite is built to show where that crossover is.
+**Where the win is.** cuBLAS is very well tuned for large dense GEMM, so a bare Triton GEMM is generally not faster (median about 0.78x vs PyTorch/cuBLAS across the 76 shapes). The win comes from fusion: folding `linear + bias + GeLU/SiLU` into one Triton kernel removes two intermediate HBM round-trips and two kernel launches (the eager baseline is three: GEMM, bias add, activation — see `src/bytes_model.py`). Fused kernels run a median 0.96x, are faster on about a third of cells, and reach up to 1.73x on one small-batch shape. The suite is built to show where that crossover is, and the roofline section below says what it doesn't explain.
 
-## Roofline: why the win is where it is
+## Roofline: what it shows and what it doesn't
 
 ![A100 roofline for the LLM-shaped GEMMs](plots/roofline_a100_gemm.png)
 
-The two headline results are the same story seen twice. Plotting each shape's achieved throughput against its operational intensity (FLOP per byte of DRAM traffic) on the A100's ceilings (312 TFLOP/s compute, 2039 GB/s HBM, ridge at **153 FLOP/byte**) splits the 76 shapes cleanly:
+Plotting each shape's achieved throughput against its operational intensity (FLOP per byte of DRAM traffic) on the A100's ceilings (312 TFLOP/s compute, 2039 GB/s HBM, ridge at **153 FLOP/byte**) splits the 76 shapes by batch:
 
-- **Small-batch shapes (M=128) are memory-bound** — operational intensity about 125 FLOP/byte, left of the ridge, reaching only ~39% of compute peak. They are bottlenecked by HBM traffic, so cutting the epilogue round-trips via fusion is a direct latency win. The best fused result (1.73x at M=128, N=11008, K=4096) lands exactly here.
-- **Larger-batch shapes (M>=256) are compute-bound** — right of the ridge, reaching ~60% of peak, where cuBLAS's tuned tensor-core scheduling beats a bare Triton GEMM (the ~0.78x median).
+- **Small-batch shapes (M=128)** sit left of the ridge, at about 125 FLOP/byte, reaching only ~39% of compute peak.
+- **Larger-batch shapes (M>=256)** sit right of the ridge, reaching ~60% of peak, where a bare Triton GEMM runs a median ~0.78x cuBLAS.
 
-The fusion win is not incidental: the roofline predicts the regime it falls in. Built from the committed CSVs with no GPU (operational intensity uses the algorithmic-minimum DRAM traffic, so achieved-vs-roof is the efficiency headroom). Regenerate: `python scripts/roofline.py`.
+**The roofline doesn't explain where fusion wins.** An earlier version of this README said it did. The fused kernel is faster than cuBLAS on 10 of 30 GELU cells left of the ridge and 42 of 122 right of it, the same share on both sides. Fusion's byte saving doesn't explain the best result either: at 128x11008x4096 fp16 (1.73x) it saves 1.12x of the bytes, about 5.5 us of a 56.3 us gap even at peak HBM rate. The same shape in bf16 runs 1.28x. Launch overhead and the eager epilogue weren't separated, so the cause of the 1.73x isn't established.
+
+Built from the committed CSVs with no GPU (operational intensity uses the algorithmic-minimum DRAM traffic, so achieved-vs-roof is the efficiency headroom). Regenerate: `python scripts/roofline.py`.
 
 ## Plots
 
